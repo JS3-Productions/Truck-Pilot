@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Truck Pilot Navigator</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" 
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5n/N0ZD31g=" crossorigin=""/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" 
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <style>
+    body { margin:0; padding:0; font-family: Arial, sans-serif; background:#0d1117; color:#c9d1d9; }
+    #map { height: 70vh; }
+    #controls {
+      position: absolute; top: 10px; left: 10px; z-index: 1000;
+      background: rgba(22,27,34,0.92); padding: 15px; border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.6); width: 320px;
+    }
+    h2 { margin: 0 0 12px; color: #58a6ff; text-align: center; }
+    label { display: block; margin: 8px 0 4px; font-size: 0.95em; }
+    input, select, button {
+      width: 100%; padding: 8px; margin-bottom: 8px; border-radius: 4px; border: 1px solid #30363d;
+      background: #161b22; color: #c9d1d9; box-sizing: border-box;
+    }
+    button { background: #238636; border: none; cursor: pointer; font-weight: bold; }
+    button:hover { background: #2ea043; }
+    #status { margin-top: 12px; padding: 8px; background: #21262d; border-radius: 4px; font-size: 0.9em; }
+    .truck-icon { font-size: 32px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <h2>🚛 Truck Pilot</h2>
+    
+    <label>Start (e.g. Indianapolis)</label>
+    <input id="start" placeholder="Address or lat,lng" value="39.7684,-86.1581"/>
+
+    <label>Destination (e.g. Chicago)</label>
+    <input id="end" placeholder="Address or lat,lng" value="41.8781,-87.6298"/>
+
+    <label>Truck Height (ft)</label>
+    <input id="height" type="number" step="0.1" value="13.5"/>
+
+    <label>Truck Weight (lbs)</label>
+    <input id="weight" type="number" value="80000"/>
+
+    <label>Avoid Tolls?</label>
+    <select id="avoid_tolls">
+      <option value="false">No</option>
+      <option value="true">Yes</option>
+    </select>
+
+    <button onclick="calculateRoute()">Calculate Truck-Safe Route</button>
+    <button onclick="simulateReroute()">Simulate Low Bridge → Reroute</button>
+
+    <div id="status">Ready — enter locations and hit Calculate</div>
+  </div>
+
+  <div id="map"></div>
+
+  <script>
+    // Initialize map centered on Indianapolis
+    const map = L.map('map').setView([39.7684, -86.1581], 7);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      maxZoom: 19
+    }).addTo(map);
+
+    let currentRouteLayer = null;
+    let truckMarker = null;
+
+    // Simple geocode helper using Nominatim (free, but rate-limited)
+    async function geocode(address) {
+      if (address.includes(',')) return address.split(',').map(Number); // already lat,lng
+      try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`);
+        const data = await res.json();
+        if (data.length > 0) return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+      } catch(e) {}
+      alert("Couldn't find that location — try lat,lng format like 39.7684,-86.1581");
+      return null;
+    }
+
+    async function calculateRoute() {
+      const startInput = document.getElementById('start').value.trim();
+      const endInput = document.getElementById('end').value.trim();
+      if (!startInput || !endInput) return alert("Enter start and end locations");
+
+      const start = await geocode(startInput);
+      const end = await geocode(endInput);
+      if (!start || !end) return;
+
+      const height = parseFloat(document.getElementById('height').value) || 13.5;
+      const weight = parseInt(document.getElementById('weight').value) || 80000;
+      const avoidTolls = document.getElementById('avoid_tolls').value === 'true';
+
+      const status = document.getElementById('status');
+      status.innerHTML = "Routing for truck (" + height + " ft, " + weight + " lbs)...";
+
+      // ORS Directions API - truck profile (free tier: sign up at openrouteservice.org for API key if rate-limited)
+      // For demo we use public instance; get your own key for heavy use: https://openrouteservice.org/sign-up/
+      const apiKey = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6Ijc1ZDkxNDhkZDcwMDQ4YzdhOGUzZmIwNzIxZjNhOGRhIiwiaCI6Im11cm11cjY0In0='; // ← paste your free ORS key here if needed (leave blank for light use)
+      const profile = 'driving-hgv'; // heavy goods vehicle = truck
+      let url = `https://api.openrouteservice.org/v2/directions/${profile}?api_key=${apiKey}&start=${start[1]},${start[0]}&end=${end[1]},${end[0]}`;
+
+      // Add truck params (ORS supports these for hgv profile)
+      url += `&vehicle_type=hgv&extra_info=waycategory,waytype,surface&`;
+      if (avoidTolls) url += '&avoid=tolls&';
+
+      // Height/weight in meters/kg for ORS
+      const heightMeters = height * 0.3048;
+      const weightKg = weight * 0.453592;
+      url += `&profile_params[restrictions][height]=${heightMeters.toFixed(2)}&profile_params[restrictions][weight]=${weightKg.toFixed(0)}`;
+
+      try {
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (data.error) throw new Error(data.error.message || "Routing failed");
+
+        const coords = data.features[0].geometry.coordinates.map(c => [c[1], c[0]]);
+        const distance = (data.features[0].properties.summary.distance / 1000).toFixed(1);
+        const time = Math.round(data.features[0].properties.summary.duration / 60);
+
+        if (currentRouteLayer) map.removeLayer(currentRouteLayer);
+        currentRouteLayer = L.polyline(coords, {color: '#00ff9d', weight: 7, opacity: 0.9}).addTo(map);
+        map.fitBounds(currentRouteLayer.getBounds());
+
+        // Truck icon on start
+        if (truckMarker) map.removeLayer(truckMarker);
+        truckMarker = L.marker(start, {
+          icon: L.divIcon({className: 'truck-icon', html: '🚛', iconSize: [40,40], iconAnchor: [20,40]})
+        }).addTo(map);
+
+        status.innerHTML = `✅ Truck-safe route found!<br>Distance: ${distance} km<br>ETA: ${time} min<br>(ORS truck profile applied)`;
+      } catch (err) {
+        status.innerHTML = `Error: ${err.message}<br>Try simpler locations or get free ORS key at openrouteservice.org`;
+      }
+    }
+
+    function simulateReroute() {
+      const status = document.getElementById('status');
+      status.innerHTML = "🚨 LOW BRIDGE DETECTED — Pilot AI rerouting...<br>New route avoids 12 ft clearance (demo)";
+      alert("In full app: would recalculate with stricter height filter or avoid certain way types.\nHere we just show the concept!");
+      // Future: add &profile_params[restrictions][height]=3.0 etc.
+    }
+  </script>
+</body>
+</html>
